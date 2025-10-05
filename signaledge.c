@@ -1,7 +1,12 @@
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/fs.h>       // headers
-#include <linux/ioctl.h>
+#include <linux/module.h>   
+#include <linux/kernel.h>   
+#include <linux/init.h> 
+#include <linux/fs.h>    
+#include <linux/slab.h>    // headers
+#include <linux/mm.h>
+#include <linux/uaccess.h> 
+#include <asm/page.h>
+#include <asm/io.h> 
 
 static int major;
 static char text[64];
@@ -10,6 +15,10 @@ static char text[64];
 static int baud_rate = 9600;
 static int spi_mode  = 0;
 static int buffer_size = sizeof(text);
+
+// mmap the page into their memory for direct access
+static void *my_data; // one page of kernel memory
+static int my_mmap(struct file *fp, struct vm_area_struct *vma);
 
 static unsigned long read_count = 0;
 static unsigned long write_count = 0;
@@ -29,44 +38,40 @@ struct signaledge_stats {
 };
 
 
-// read function 
-static ssize_t	my_read(struct file *fp, char __user *user_buf, size_t len, loff_t *offset)// reading function declartion
+// write handeler --> user space to kernel memory
+static ssize_t my_write(struct file *fp, const char __user *buf,size_t len, loff_t *off)
 {
-    int not_copied, delta ,to_copy =(len +*offset ) < sizeof(text) ? len :(sizeof(text))-*offset;
-    if (*offset>=sizeof(text))
-    {
-        return 0;
-    }
-    not_copied=copy_to_user(user_buf,&text[*offset],to_copy);
-    printk( KERN_INFO "reading is done\n");
-    delta=to_copy - not_copied;
-    if (not_copied)
-    {
-        pr_warn("could only copy %d bytes\n",delta);
-    }
-    *offset+=delta;
-    return delta;
-    
+    if (len > PAGE_SIZE) len = PAGE_SIZE;  // clamp
+    if (copy_from_user(my_data, buf, len))
+        return -EFAULT;
+    printk("my_write: wrote %zu bytes: %s\n", len, (char*)my_data);
+    return len;
 }
 
-// write function
-static ssize_t	my_write(struct file *fp, const char __user *user_buf, size_t len, loff_t *offset)// writing  function declartion
+// read handler --> kernel memory to user space 
+static ssize_t my_read(struct file *fp, char __user *buf,size_t len, loff_t *off)
 {
-    int not_copied, delta ,to_copy =(len +*offset ) < sizeof(text) ? len :(sizeof(text))-*offset;
-    if (*offset>=sizeof(text))
+    if (len > PAGE_SIZE) len = PAGE_SIZE;  // clamp
+    if (copy_to_user(buf, my_data, len))
+        return -EFAULT;
+    printk("my_read: read %zu bytes: %s\n", len, (char*)my_data);
+    return len;
+}
+
+// mmap-handler 
+static int my_mmap(struct file *fp, struct vm_area_struct *vma)
+{
+    int status;
+    vma->vm_pgoff=virt_to_phys(my_data)>>PAGE_SHIFT;// gets the physical address of the kernel buffer 
+    // -- > maps that physical page into user space
+    status=remap_pfn_range(vma,vma->vm_start,vma->vm_pgoff,vma->vm_end-vma->vm_start,vma->vm_page_prot);
+    if(status)
     {
-        return 0;
+        pr_err("couldnot map memory to user space\n");
+        return -EAGAIN;
     }
-    not_copied=copy_from_user(&text[*offset],user_buf,to_copy);
-    printk( KERN_INFO "writing is done\n");
-    delta=to_copy - not_copied;
-    if (not_copied)
-    {
-        pr_warn("could only copy %d bytes\n",delta);
-    }
-    *offset+=delta;
-    return delta;
-   
+    return 0;
+
 }
 
 //open function 
@@ -128,6 +133,8 @@ static long my_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 //declaring the file operations
 static struct file_operations fops = { 
     .read=my_read,
+    .owner=THIS_MODULE,
+    .mmap=my_mmap,
     .write=my_write,                
     .open=my_open,
     .release=my_close,
@@ -137,6 +144,13 @@ static struct file_operations fops = {
 //initializer
 static int __init hello_init(void)
 {
+    printk("Module is loaded!\n");
+    my_data=kzalloc(PAGE_SIZE,GFP_DMA); //allocate one page of memory in DMA safe memory
+    if(!my_data)
+    {
+        pr_err("couldnot allocate memory\n");
+        return -ENOMEM;
+    }
     major=register_chrdev(0,"my_char_driver",&fops);
     if (major <0)
     {
@@ -154,7 +168,7 @@ static int __init hello_init(void)
 //destructor
 static void __exit hello_exit(void)
 {
-    printk("module_exit: entry\n");
+    printk("Module is removed\n");
     unregister_chrdev(major,"my_char_driver");
    
 }
