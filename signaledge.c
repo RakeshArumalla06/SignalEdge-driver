@@ -9,7 +9,7 @@
 #include <asm/io.h> 
 
 static int major;
-static char text[64];
+static char text[64];//  starting the buffer size with 64 bytes
 
 //runt time parameters
 static int baud_rate = 9600;
@@ -37,39 +37,69 @@ struct signaledge_stats {
     int buf_size;
 };
 
-
-// write handeler --> user space to kernel memory
+// to have control over size of the buffer 
+static size_t clamp_len(size_t len)
+{
+    if (len > (size_t)buffer_size) len=buffer_size;
+    if (len > PAGE_SIZE) len=PAGE_SIZE;
+    return len;
+}
+// write handler --> user space to kernel memory
 static ssize_t my_write(struct file *fp, const char __user *buf,size_t len, loff_t *off)
 {
-    if (len > PAGE_SIZE) len = PAGE_SIZE;  // clamp
-    if (copy_from_user(my_data, buf, len))
+     size_t to_copy = clamp_len(len);
+
+    if (!my_data)
+        return -ENODEV;
+
+    if (copy_from_user(my_data, buf, to_copy))
         return -EFAULT;
-    printk("my_write: wrote %zu bytes: %s\n", len, (char*)my_data);
-    return len;
+
+    write_count++;
+    pr_info("signaledge: wrote %zu bytes (buffer_size=%d)\n", to_copy, buffer_size);
+    return to_copy;
 }
 
 // read handler --> kernel memory to user space 
 static ssize_t my_read(struct file *fp, char __user *buf,size_t len, loff_t *off)
 {
-    if (len > PAGE_SIZE) len = PAGE_SIZE;  // clamp
-    if (copy_to_user(buf, my_data, len))
+     size_t to_copy = clamp_len(len);
+
+    if (!my_data)
+        return -ENODEV;
+
+    if (copy_to_user(buf, my_data, to_copy))
         return -EFAULT;
-    printk("my_read: read %zu bytes: %s\n", len, (char*)my_data);
-    return len;
+
+    read_count++;
+    pr_info("signaledge: read %zu bytes (buffer_size=%d)\n", to_copy, buffer_size);
+    return to_copy;
 }
 
 // mmap-handler 
 static int my_mmap(struct file *fp, struct vm_area_struct *vma)
 {
-    int status;
-    vma->vm_pgoff=virt_to_phys(my_data)>>PAGE_SHIFT;// gets the physical address of the kernel buffer 
-    // -- > maps that physical page into user space
-    status=remap_pfn_range(vma,vma->vm_start,vma->vm_pgoff,vma->vm_end-vma->vm_start,vma->vm_page_prot);
-    if(status)
+    unsigned long size=vma->vm_end -vma->vm_start;
+    unsigned long pfn;
+    int ret;
+    if(!my_data) return -ENODEV;
+
+    if(size > PAGE_SIZE)
     {
-        pr_err("couldnot map memory to user space\n");
+        pr_err("signaledge: mmap size %lu > PAGE_SIZE\n", size);
+        return -EINVAL;
+    }
+
+    vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP); //setting up the flags
+    pfn = (unsigned long)virt_to_phys(my_data) >> PAGE_SHIFT; //page frame number 
+    ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
+    if (ret) {
+        pr_err("signaledge: remap_pfn_range failed: %d\n", ret);
         return -EAGAIN;
     }
+
+    pr_info("signaledge: mmap OK (size %lu, pfn 0x%lx, buffer_size=%d)\n",
+            size, pfn, buffer_size);
     return 0;
 
 }
@@ -78,14 +108,14 @@ static int my_mmap(struct file *fp, struct vm_area_struct *vma)
 static int my_open(struct inode *inode, struct file *fp) // declartion file opening function
 {
     //printk(KERN_INFO "File opened with major no : %d and minor no : %d/n",imajor(inode),iminor(inode));
-    pr_info("File is opened\n");
+    pr_info("SignalEdge: Device Opened\n");
     return 0;
 }
 
 //close function 
 static int my_close(struct inode *inode, struct file *fp) // declartion file opening function
 {
-    pr_info("File is closed\n");
+    pr_info("SignalEdge: Device Closed\n");
     return 0;
 }
 
@@ -110,9 +140,9 @@ static long my_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
     case SIGNALEDGE_SET_BUFSIZE:
         if (copy_from_user(&buffer_size, (int __user *)arg, sizeof(int)))
             return -EFAULT;
-        if (buffer_size > sizeof(text))
-            buffer_size = sizeof(text);
-        pr_info("Buffer size set to %d\n", buffer_size);
+        if (buffer_size <= 0 || buffer_size > PAGE_SIZE)
+            return -EINVAL;
+        pr_info("signaledge: buffer_size set to %d\n", buffer_size);
         break;
 
     case SIGNALEDGE_GET_STATS:
@@ -142,41 +172,44 @@ static struct file_operations fops = {
 };
 
 //initializer
-static int __init hello_init(void)
+static int __init signaledge_init(void)
 {
-    printk("Module is loaded!\n");
-    my_data=kzalloc(PAGE_SIZE,GFP_DMA); //allocate one page of memory in DMA safe memory
-    if(!my_data)
-    {
-        pr_err("couldnot allocate memory\n");
+  
+    pr_info("signaledge: module loading\n");
+    my_data = (void *)__get_free_page(GFP_KERNEL);
+    if (!my_data) {
+        pr_err("signaledge: failed to allocate page\n");
         return -ENOMEM;
     }
-    major=register_chrdev(0,"my_char_driver",&fops);
-    if (major <0)
-    {
-      printk(KERN_ERR "char driver is failed\n");
-      return major;
+    memset(my_data, 0, PAGE_SIZE);
+    major = register_chrdev(0, "signaledge", &fops);
+    if (major < 0) {
+        pr_err("signaledge: register_chrdev failed: %d\n", major);
+        free_page((unsigned long)my_data);
+        return major;
     }
-    else
-    {
-        printk(KERN_INFO "char driver module no: %d\n",major);
-    }
+    pr_info("signaledge: registered major %d (initial buffer_size=%d)\n",
+            major, buffer_size);
     return 0;
     
 }
 
 //destructor
-static void __exit hello_exit(void)
+static void __exit signaledge_exit(void)
 {
-    printk("Module is removed\n");
-    unregister_chrdev(major,"my_char_driver");
+    pr_info("signaledge: module unloading\n");
+    if (major >= 0)
+        unregister_chrdev(major, "signaledge");
+
+    if (my_data)
+        free_page((unsigned long)my_data);
    
 }
 
 
 
-module_init(hello_init);
-module_exit(hello_exit);
+module_init(signaledge_init);
+module_exit(signaledge_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Rakesh Arumalla");
