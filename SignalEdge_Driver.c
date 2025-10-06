@@ -261,4 +261,4 @@ module_exit(vuart_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Rakesh Arumalla");
-MODULE_DESCRIPTION("Virtual Temp & Fan Driver with LEDs + I2C LCD + mmap(shared) + IOCTL + Mutex");
+MODULE_DESCRIPTION("Custom Linux kernel module implementing a UART-SPI bridge");
