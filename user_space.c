@@ -4,85 +4,105 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <string.h>
-
-#define VUART_IOC_MAGIC 'v'
-
-#define VUART_SET_FAN_SPEED _IOW(VUART_IOC_MAGIC, 1, int)
-#define VUART_SET_THRESHOLD _IOW(VUART_IOC_MAGIC, 2, int)
-#define VUART_GET_STATS     _IOR(VUART_IOC_MAGIC, 3, struct vuart_stats)
-
-struct vuart_stats {
-    int temp;
-    int fan_speed;
-    int threshold;
-    int alert_flag;
-};
+#include "signaledge_ioctl.h"   // ioctl header
 
 int main(void)
 {
     int fd;
-    struct vuart_stats stats;
+    struct signaledge_stats stats;
     int choice, val;
 
-    fd = open("/dev/vuart_sensor", O_RDWR);
+    fd = open("/dev/signaledge", O_RDWR);
     if (fd < 0) {
         perror("open");
         return 1;
     }
-    printf("Device /dev/vuart_sensor opened successfully!\n");
+    printf("Device /dev/signaledge opened successfully!\n");
 
     while (1) {
-        printf("\n--- Virtual UART Sensor Control ---\n");
-        printf("1. Set Fan Speed\n");
-        printf("2. Set Temperature Threshold\n");
-        printf("3. Get Sensor Stats\n");
-        printf("4. Exit\n");
+        printf("\n--- SignalEdge Virtual Sensor Control ---\n");
+        printf("1. Set UART Baud Rate\n");
+        printf("2. Set I2C Mode\n");
+        printf("3. Set Buffer Size\n");
+        printf("4. Set Temperature Threshold\n");
+        printf("5. Set Fan Speed\n");
+        printf("6. Get Device Stats\n");
+        printf("7. Exit\n");
         printf("Enter your choice: ");
-        
+
         if (scanf("%d", &choice) != 1) {
-            while (getchar() != '\n'); // clear bad input
+            while (getchar() != '\n'); // clear invalid input
             continue;
         }
 
         switch (choice) {
             case 1:
-                printf("Enter new Fan Speed: ");
+                printf("Enter new UART Baud Rate: ");
                 scanf("%d", &val);
-                if (ioctl(fd, VUART_SET_FAN_SPEED, &val) < 0)
-                    perror("ioctl - set fan speed");
+                if (ioctl(fd, SIGNALEDGE_SET_UART_BAUD, &val) < 0)
+                    perror("ioctl - set baud rate");
                 else
-                    printf("Fan speed updated to %d\n", val);
+                    printf("UART Baud Rate updated to %d\n", val);
                 break;
 
             case 2:
-                printf("Enter new Threshold: ");
+                printf("Enter new I2C Mode (0 = Standard, 1 = Fast, 2 = High-speed): ");
                 scanf("%d", &val);
-                if (ioctl(fd, VUART_SET_THRESHOLD, &val) < 0)
-                    perror("ioctl - set threshold");
+                if (ioctl(fd, SIGNALEDGE_SET_I2C_MODE, &val) < 0)
+                    perror("ioctl - set I2C mode");
                 else
-                    printf("Threshold updated to %d°C\n", val);
+                    printf("I2C Mode updated to %d\n", val);
                 break;
 
             case 3:
-                if (ioctl(fd, VUART_GET_STATS, &stats) < 0)
-                    perror("ioctl - get stats");
+                printf("Enter new Buffer Size (max 4096): ");
+                scanf("%d", &val);
+                if (ioctl(fd, SIGNALEDGE_SET_BUFSIZE, &val) < 0)
+                    perror("ioctl - set buffer size");
                 else
-                    printf("Current Sensor Stats:\n"
-                           "  Temperature: %d°C\n"
-                           "  Fan Speed:   %d\n"
-                           "  Threshold:   %d°C\n"
-                           "  Alert:       %s\n",
-                           stats.temp, stats.fan_speed, stats.threshold,
-                           stats.alert_flag ? "OVERHEAT" : "OK");
+                    printf("Buffer Size updated to %d bytes\n", val);
                 break;
 
             case 4:
+                printf("Enter new Temperature Threshold (°C): ");
+                scanf("%d", &val);
+                if (ioctl(fd, SIGNALEDGE_SET_THRESHOLD, &val) < 0)
+                    perror("ioctl - set threshold");
+                else
+                    printf("Temperature threshold updated to %d°C\n", val);
+                break;
+
+            case 5:
+                printf("Enter new Fan Speed (RPM): ");
+                scanf("%d", &val);
+                if (ioctl(fd, SIGNALEDGE_SET_FAN_SPEED, &val) < 0)
+                    perror("ioctl - set fan speed");
+                else
+                    printf("Fan speed updated to %d RPM\n", val);
+                break;
+
+            case 6:
+                if (ioctl(fd, SIGNALEDGE_GET_STATS, &stats) < 0)
+                    perror("ioctl - get stats");
+                else {
+                    printf("Current Device Stats:\n");
+                    printf("  Temperature     : %d°C\n", stats.temp);
+                    printf("  Fan Speed       : %d RPM\n", stats.fan_speed);
+                    printf("  Threshold Temp  : %d°C\n", stats.threshold);
+                    printf("  Alert Flag      : %s\n", stats.alert_flag ? "OVERHEAT" : "OK");
+                    printf("  Buffer Size     : %d bytes\n", stats.buf_size);
+                    printf("  UART Baud Rate  : %d\n", stats.baud_rate);
+                    printf("  I2C Mode        : %d\n", stats.i2c_mode);
+                }
+                break;
+
+            case 7:
                 close(fd);
                 printf("Exiting...\n");
                 return 0;
 
             default:
-                printf("Invalid choice!\n");
+                printf("Invalid choice! Try again.\n");
         }
     }
 
